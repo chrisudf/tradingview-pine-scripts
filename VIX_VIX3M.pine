@@ -1,0 +1,54 @@
+//@version=5
+// VIX/VIX3M 期限结构倒挂监控
+// 用法:TradingView Pine Editor 粘贴 → Add to chart(建议挂在日线图上,警报用"每根K线收盘时触发")
+// 信号体系(对应《危机黄金与左右侧交易·实战笔记》第九节):
+//   上穿 1.0 = 倒挂开始,恐慌集中当下 → 卖 CSP 窗口打开(分批,第一档)
+//   上穿 1.1 = 历史级恐慌区(2008/2011/2015/2018/2020/2024/2025 都到过)→ 加第二、三档
+//   下穿 1.0 = 倒挂解除 → 去查右侧确认(收复20日线/突破下降趋势线),LEAP/risk reversal 窗口
+//   回测(2009-2026, 43次事件):解除时买 SPX 5日+3.04%胜率88%;开始时买 5日-0.15%胜率51%
+indicator("VIX/VIX3M 期限结构倒挂", shorttitle="VIX/VIX3M", overlay=false, precision=3)
+
+useDaily = input.bool(true, "固定用日线收盘(与图表周期无关,推荐)")
+res = useDaily ? "D" : timeframe.period
+
+vix   = request.security("CBOE:VIX",   res, close, barmerge.gaps_off, barmerge.lookahead_off)
+vix3m = request.security("CBOE:VIX3M", res, close, barmerge.gaps_off, barmerge.lookahead_off)
+ratio = vix / vix3m
+
+// 连续倒挂交易日计数
+var int invDays = 0
+invDays := ratio > 1.0 ? invDays + 1 : 0
+
+// 比值线:contango 青色 / 倒挂橙色 / 历史级红色
+colLine = ratio > 1.1 ? color.red : ratio > 1.0 ? color.orange : color.teal
+plot(ratio, "VIX/VIX3M", color=colLine, linewidth=2)
+hline(1.0, "倒挂线 1.0", color=color.gray, linestyle=hline.style_solid)
+hline(1.1, "历史级恐慌 1.1", color=color.red, linestyle=hline.style_dashed)
+bgcolor(ratio > 1.1 ? color.new(color.red, 78) : ratio > 1.0 ? color.new(color.orange, 86) : na)
+
+// 交叉信号
+crossUp   = ta.crossover(ratio, 1.0)
+crossDeep = ta.crossover(ratio, 1.1)
+crossDown = ta.crossunder(ratio, 1.0)
+plotshape(crossUp,   "上穿1.0", style=shape.triangleup,   location=location.bottom, color=color.orange, size=size.tiny, text="卖put窗口")
+plotshape(crossDeep, "上穿1.1", style=shape.triangleup,   location=location.bottom, color=color.red,    size=size.tiny, text="加档")
+plotshape(crossDown, "下穿1.0", style=shape.triangledown, location=location.top,    color=color.teal,   size=size.tiny, text="解除·查右侧")
+
+// 右上角状态表
+var table t = table.new(position.top_right, 2, 4, border_width=1)
+if barstate.islast
+    stateTxt = ratio > 1.1 ? "历史级倒挂" : ratio > 1.0 ? "倒挂中" : "contango 正常"
+    stateBg  = ratio > 1.1 ? color.new(color.red, 60) : ratio > 1.0 ? color.new(color.orange, 60) : color.new(color.teal, 70)
+    table.cell(t, 0, 0, "VIX",        text_size=size.small, bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 0, str.tostring(vix, "#.##"),   text_size=size.small, bgcolor=color.new(color.gray, 80))
+    table.cell(t, 0, 1, "VIX3M",      text_size=size.small, bgcolor=color.new(color.gray, 80))
+    table.cell(t, 1, 1, str.tostring(vix3m, "#.##"), text_size=size.small, bgcolor=color.new(color.gray, 80))
+    table.cell(t, 0, 2, "比值",       text_size=size.small, bgcolor=stateBg)
+    table.cell(t, 1, 2, str.tostring(ratio, "#.###"), text_size=size.small, bgcolor=stateBg)
+    table.cell(t, 0, 3, stateTxt,     text_size=size.small, bgcolor=stateBg)
+    table.cell(t, 1, 3, "连续 " + str.tostring(invDays) + " 日", text_size=size.small, bgcolor=stateBg)
+
+// 警报(添加警报时选本指标,条件选下面任意一条;触发方式选"每根K线收盘")
+alertcondition(crossUp,   "倒挂开始(上穿1.0)",  "VIX/VIX3M 上穿 1.0:恐慌集中当下,CSP 窗口打开,分批第一档")
+alertcondition(crossDeep, "历史级恐慌(上穿1.1)", "VIX/VIX3M 上穿 1.1:历史级恐慌区,加第二/三档,倒挂期间不加右侧仓")
+alertcondition(crossDown, "倒挂解除(下穿1.0)",  "VIX/VIX3M 下穿 1.0:倒挂解除——查右侧确认(20日线/下降趋势线),LEAP/risk reversal 窗口")
