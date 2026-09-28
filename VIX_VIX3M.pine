@@ -148,9 +148,11 @@ tierAct  = inv ? (invDays >= longLen ? "按标普修正5–10%管理仓位, 抄�
 tierCol  = inv ? (invDays >= longLen ? color.maroon : color.red) : reliefOn ? color.green : ratio >= tightLvl ? #c79a00 : color.teal
 
 // 近两年分位与近期倒挂占比
+// P95/P99 用 nearest-rank: 取的是窗口里真实出现过的读数, 与 thetrading.tools 同口径, 可直接对账。
+// (Pine 的 percentile_linear_interpolation 实为 Hazen 公式, P99 比 nearest-rank 系统性高, 中位差 0.002, 最多 0.04)
 pctRank = ta.percentrank(ratio, pctLen)
-p95     = ta.percentile_linear_interpolation(ratio, pctLen, 95)
-p99     = ta.percentile_linear_interpolation(ratio, pctLen, 99)
+p95     = ta.percentile_nearest_rank(ratio, pctLen, 95)
+p99     = ta.percentile_nearest_rank(ratio, pctLen, 99)
 inv60   = math.sum(inv ? 1 : 0, 60) / 60 * 100
 inv90   = math.sum(inv ? 1 : 0, 90) / 90 * 100
 
@@ -158,6 +160,8 @@ plot(invDays, "倒挂连续日",       display=display.data_window)
 plot(conDays, "contango 连续日",  display=display.data_window)
 plot(pctRank, "近两年分位",       display=display.data_window)
 plot(reliefOn ? bar_index - qualEnd : na, "解除窗口第N日", display=display.data_window)
+plot(p95, "近两年P95", display=display.data_window)
+plot(p99, "近两年P99", display=display.data_window)
 
 // 状态表(窗格矮时选"精简", 或把窗格拉高)
 tblPos  = tblPosIn == "右下" ? position.bottom_right : tblPosIn == "左上" ? position.top_left : tblPosIn == "左下" ? position.bottom_left : position.top_right
