@@ -8,14 +8,16 @@
 // 信号体系(对应《危机黄金与左右侧交易·实战笔记》第九节 + 期限结构仓位五档):
 //   上穿 1.0 = 倒挂开始, 恐慌集中当下 → 降高 Beta; 卖 CSP 窗口打开(分批, 第一档)。同时 VIX > 25 = 近端恐慌(规则 3)
 //   上穿 1.1 = 显著压力 → CSP 加第二、三档, 倒挂期间不加右侧仓
-//   倒挂满 5 日 = 状态真正转换; 满 15 日(约三周) = 按标普至少 5–10% 修正管理仓位, 抄底轻仓等止跌(规则 4)
+//   倒挂满 5 日 = 状态真正转换; 满 10 日(约两周) = 准备修正预案;
+//   满 15 日(约三周) = 按标普至少 5–10% 修正管理仓位, 抄底轻仓等止跌(规则 4)
 //   下穿 1.0 = 倒挂解除 → 查右侧确认(收复 20 日线 / 突破下降趋势线), LEAP / risk reversal 窗口
 //   本轮峰值 ≥ 1.1 后下穿 1.0 = 恐慌消退, 分批加仓(规则 5)
 //
 // 分档与基准率(CBOE 日收盘, 2009-09 起; 算法与 thetrading.tools/vix-term-structure 一致, 2026-09-25 核对数值吻合):
 //   < 0.90        平静      VIX < 16 时远期价外 put 便宜(规则 1)
 //   0.90 – 1.00   偏紧      仓位不动, 少做重仓 / 满仓追(规则 2)
-//   > 1.0         倒挂      2010 年起占 7.6% 的交易日。105 次里 52 次只有 1 天, ≥5 天 15 次, ≥15 天 3 次(2011 / 2020 / 2025)
+//   > 1.0         倒挂      2010 年起占 7.6% 的交易日。105 次里 52 次只有 1 天, ≥5 天 15 次,
+//                           ≥10 天 5 次(2011-07 / 2011-09 / 2018-12 / 2020-02 / 2025-04), ≥15 天 3 次(2011-07 / 2020 / 2025)
 //   > 1.1         显著压力  占 1.6% 的交易日, 9 个年份到过: 2010 / 11 / 14 / 15 / 18 / 19 / 20 / 24 / 25
 //   > 1.2         严重恐慌
 //   > 1.3         危机级    只有 2015 / 2018 / 2020
@@ -50,6 +52,8 @@ showExt   = input.bool(false, "画 1.2 / 1.3 参考线(会压缩纵轴)", group=
 tblMode   = input.string("完整", "状态表", options=["完整", "精简"], group=grpD)
 tblPosIn  = input.string("右上", "状态表位置", options=["右上", "右下", "左上", "左下"], group=grpD)
 tblSizeIn = input.string("小", "状态表字号", options=["极小", "小", "中"], group=grpD)
+// 新输入一律加在最后: TV 按声明顺序编 in_N, 插在中间会让图上已存的设置错位
+midLen    = input.int(10, "持续倒挂 = 准备修正预案(日, 约两周)", minval=3, group=grpS)
 
 // CBOE 波动率指数的日K 16:15 ET 才收, 比美股 16:00 晚。lookahead_off 只取"已收盘"的那根,
 // 于是挂在 SPY / 个股图上每根都拿到前一根的 VIX(v1 在日线上整段历史错一天, 小时图上停在昨天收盘)。
@@ -101,6 +105,7 @@ crossUp   = invDays == 1
 upPanic   = crossUp and vix > panicVix
 crossDeep = ta.crossover(ratio, 1.1)
 dayRegime = invDays == regimeLen
+dayMid    = invDays == midLen
 dayLong   = invDays == longLen
 relief    = endNow and lastPeak >= 1.1
 curveInv  = vix > vix3m and vix3m > vix6m and vix6m > vix1y
@@ -116,6 +121,7 @@ plotshape(crossUp and not upPanic, "倒挂开始",        shape.triangleup,   lo
 plotshape(upPanic,                 "倒挂开始且VIX高", shape.triangleup,   location.bottom,   color.red,    size=size.tiny, text="恐慌",   textcolor=color.red)
 plotshape(crossDeep ? ratio : na,  "上穿1.1",         shape.diamond,      location.absolute, color.red,    size=size.tiny, text="加档",   textcolor=color.red)
 plotshape(dayRegime ? ratio : na,  "倒挂满N日",       shape.circle,       location.absolute, color.maroon, size=size.tiny, text="5日",    textcolor=color.maroon)
+plotshape(dayMid ? ratio : na,     "倒挂满两周",      shape.circle,       location.absolute, color.fuchsia, size=size.tiny, text="10日", textcolor=color.fuchsia)
 plotshape(dayLong ? ratio : na,    "倒挂满三周",      shape.circle,       location.absolute, color.purple, size=size.tiny, text="15日",   textcolor=color.purple)
 plotshape(curveUp ? ratio : na,    "整条曲线倒挂",    shape.square,       location.absolute, chart.fg_color, size=size.tiny, text="全线", textcolor=chart.fg_color)
 plotshape(endNow and not relief,   "倒挂解除·查右侧", shape.triangledown, location.top,      color.teal,   size=size.tiny, text="解除",   textcolor=color.teal)
@@ -187,6 +193,7 @@ alertcondition(crossUp,   "倒挂开始(上穿1.0)",      'VIX/VIX3M 上穿 1.0 
 alertcondition(upPanic,   "倒挂开始且VIX高(规则3)", 'VIX/VIX3M 上穿 1.0 = {{plot("VIX/VIX3M")}} 且 VIX 超过阈值: 近端恐慌已开始, 降高 Beta / 垃圾债持仓')
 alertcondition(crossDeep, "显著压力(上穿1.1)",      'VIX/VIX3M 上穿 1.1 = {{plot("VIX/VIX3M")}}: 显著压力, CSP 加第二/三档, 倒挂期间不加右侧仓')
 alertcondition(dayRegime, "倒挂满N日(状态转换)",    'VIX/VIX3M 连续倒挂满设定天数(默认 5): 不是单日噪音, 状态已转换')
+alertcondition(dayMid,    "倒挂满两周",             'VIX/VIX3M 连续倒挂满设定天数(默认 10): 2009 年起只有 5 次走到这里, 其中 3 次继续到 15 日——准备修正预案')
 alertcondition(dayLong,   "倒挂满三周(规则4)",      'VIX/VIX3M 连续倒挂满设定天数(默认 15): 按标普至少 5–10% 修正管理仓位, 抄底轻仓等止跌')
 alertcondition(endNow,    "倒挂解除(下穿1.0)",      'VIX/VIX3M 下穿 1.0 = {{plot("VIX/VIX3M")}}: 倒挂解除——查右侧确认(20日线/下降趋势线), LEAP/risk reversal 窗口')
 alertcondition(relief,    "恐慌消退(规则5)",        'VIX/VIX3M 本轮峰值 ≥1.1 后回到 1.0 以下: 恐慌消退, 分批加仓')
