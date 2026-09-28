@@ -1,54 +1,193 @@
 //@version=5
-// VIX/VIX3M 期限结构倒挂监控
-// 用法:TradingView Pine Editor 粘贴 → Add to chart(建议挂在日线图上,警报用"每根K线收盘时触发")
-// 信号体系(对应《危机黄金与左右侧交易·实战笔记》第九节):
-//   上穿 1.0 = 倒挂开始,恐慌集中当下 → 卖 CSP 窗口打开(分批,第一档)
-//   上穿 1.1 = 历史级恐慌区(2008/2011/2015/2018/2020/2024/2025 都到过)→ 加第二、三档
-//   下穿 1.0 = 倒挂解除 → 去查右侧确认(收复20日线/突破下降趋势线),LEAP/risk reversal 窗口
-//   回测(2009-2026, 43次事件):解除时买 SPX 5日+3.04%胜率88%;开始时买 5日-0.15%胜率51%
+// VIX/VIX3M 期限结构倒挂监控 v2
+// 用法: TradingView Pine Editor 粘贴 → Add to chart, 挂在美股日线图上(SPX / SPY / 个股日线都行)。
+//       连续天数、本轮峰值、交叉信号都按图表K线逐根算, 非日线图数的就不是"日", 表格会报警。
+//       警报触发方式选"每根K线收盘一次"——盘中比值是实时值, 收盘才算数。
+// 定位: 用来定调风险和仓位, 不当唯一的买卖触发条件。
+//
+// 信号体系(对应《危机黄金与左右侧交易·实战笔记》第九节 + 期限结构仓位五档):
+//   上穿 1.0 = 倒挂开始, 恐慌集中当下 → 降高 Beta; 卖 CSP 窗口打开(分批, 第一档)。同时 VIX > 25 = 近端恐慌(规则 3)
+//   上穿 1.1 = 显著压力 → CSP 加第二、三档, 倒挂期间不加右侧仓
+//   倒挂满 5 日 = 状态真正转换; 满 15 日(约三周) = 按标普至少 5–10% 修正管理仓位, 抄底轻仓等止跌(规则 4)
+//   下穿 1.0 = 倒挂解除 → 查右侧确认(收复 20 日线 / 突破下降趋势线), LEAP / risk reversal 窗口
+//   本轮峰值 ≥ 1.1 后下穿 1.0 = 恐慌消退, 分批加仓(规则 5)
+//
+// 分档与基准率(CBOE 日收盘, 2009-09 起; 算法与 thetrading.tools/vix-term-structure 一致, 2026-09-25 核对数值吻合):
+//   < 0.90        平静      VIX < 16 时远期价外 put 便宜(规则 1)
+//   0.90 – 1.00   偏紧      仓位不动, 少做重仓 / 满仓追(规则 2)
+//   > 1.0         倒挂      2010 年起占 7.6% 的交易日。105 次里 52 次只有 1 天, ≥5 天 15 次, ≥15 天 3 次(2011 / 2020 / 2025)
+//   > 1.1         显著压力  占 1.6% 的交易日, 9 个年份到过: 2010 / 11 / 14 / 15 / 18 / 19 / 20 / 24 / 25
+//   > 1.2         严重恐慌
+//   > 1.3         危机级    只有 2015 / 2018 / 2020
+//   上穿 1.0 时 VIX > 25: 105 次里 41 次。峰值 ≥ 1.1 后解除: 14 次。
+//   规则 1 / 2 的 VIX 条件覆盖不全(42% 的 contango 日两条都不满足), 这里按比值归档, VIX 只改提示语。
+//
+// 信号当天收盘买 SPX 的前瞻收益(平均 / 胜率, 2009-09 起, 只用当天已知的信息):
+//                          5 日           21 日          63 日
+//   任意一天(基准)       +0.26% / 60%   +1.07% / 68%   +3.17% / 75%
+//   倒挂开始(上穿 1.0)   +0.74% / 62%   +1.85% / 71%   +4.14% / 74%
+//   倒挂解除(下穿 1.0)   +0.79% / 64%   +2.05% / 74%   +4.22% / 78%
+//   两者平均收益差不多; 差别在最坏情况: 买入后 21 日内最大回撤最差的一次, 开始时买 -30.6%(2020), 解除时买 -11.6%。
+//   等解除的价值是躲开 2011 / 2020 这种长期倒挂时"抄在半山腰", 不是平均多赚。
+//   (v1 注释的"+3.04% / 胜率 88%"以"最后一个倒挂日"为买点, 当天无法知道, 属未来数据, 已删。)
+//
+// 整条曲线倒挂(VIX > VIX3M > VIX6M > VIX1Y): 2013 年起约 23–25 次, 其中 19–21 次发生时标普已从 52 周高点回撤 ≥5%,
+//   之后 30 天内又跌 5% 的只有 8–9 次——它确认"现在很慌", 很少提前报警。
 indicator("VIX/VIX3M 期限结构倒挂", shorttitle="VIX/VIX3M", overlay=false, precision=3)
 
-useDaily = input.bool(true, "固定用日线收盘(与图表周期无关,推荐)")
-res = useDaily ? "D" : timeframe.period
+grpS = "信号"
+panicVix  = input.float(25.0, "规则3: 倒挂开始时 VIX 高于", step=0.5, group=grpS)
+regimeLen = input.int(5,  "持续倒挂 = 状态转换(日)", minval=2, group=grpS)
+longLen   = input.int(15, "持续倒挂 = 按修正管理(日, 约三周)", minval=5, group=grpS)
+reliefWin = input.int(21, "恐慌消退后分批加仓窗口(日)", minval=1, group=grpS)
+grpT = "仓位档位"
+calmVix   = input.float(16.0, "VIX 低于此 = 保护便宜", step=0.5, group=grpT)
+tightLvl  = input.float(0.90, "比值高于此 = 偏紧", step=0.01, group=grpT)
+grpD = "显示"
+pctLen    = input.int(504, "分位数回看(日, 504 ≈ 2 年)", minval=100, group=grpD)
+showCurve = input.bool(true, "检查整条曲线倒挂(VIX > VIX3M > VIX6M > VIX1Y)", group=grpD)
+showExt   = input.bool(false, "画 1.2 / 1.3 参考线(会压缩纵轴)", group=grpD)
+tblMode   = input.string("完整", "状态表", options=["完整", "精简"], group=grpD)
+tblPosIn  = input.string("右上", "状态表位置", options=["右上", "右下", "左上", "左下"], group=grpD)
+tblSizeIn = input.string("小", "状态表字号", options=["极小", "小", "中"], group=grpD)
 
-vix   = request.security("CBOE:VIX",   res, close, barmerge.gaps_off, barmerge.lookahead_off)
-vix3m = request.security("CBOE:VIX3M", res, close, barmerge.gaps_off, barmerge.lookahead_off)
+// CBOE 波动率指数的日K 16:15 ET 才收, 比美股 16:00 晚。lookahead_off 只取"已收盘"的那根,
+// 于是挂在 SPY / 个股图上每根都拿到前一根的 VIX(v1 在日线上整段历史错一天, 小时图上停在昨天收盘)。
+// 按图表周期请求并用 lookahead_on: 同周期请求取的是同一时段的那根, 不引入未来数据(最多差收盘后 15 分钟)。
+isD   = timeframe.isdaily and timeframe.multiplier == 1
+vix   = request.security("CBOE:VIX",   timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_on)
+vix3m = request.security("CBOE:VIX3M", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_on)
+vix6m = request.security("CBOE:VIX6M", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_on)
+vix1y = request.security("CBOE:VIX1Y", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_on)
 ratio = vix / vix3m
+inv   = ratio > 1.0
 
-// 连续倒挂交易日计数
-var int invDays = 0
-invDays := ratio > 1.0 ? invDays + 1 : 0
+// 连续天数与每一轮倒挂的峰值
+var int   invDays  = 0
+var int   conDays  = 0
+var float peak     = na
+var float lastPeak = na
+var int   lastLen  = 0
+endNow = false
+if not na(ratio)
+    if inv
+        invDays += 1
+        conDays := 0
+        peak := invDays == 1 ? ratio : math.max(peak, ratio)
+    else
+        if invDays > 0
+            endNow   := true
+            lastPeak := peak
+            lastLen  := invDays
+        invDays := 0
+        conDays += 1
 
-// 比值线:contango 青色 / 倒挂橙色 / 历史级红色
-colLine = ratio > 1.1 ? color.red : ratio > 1.0 ? color.orange : color.teal
-plot(ratio, "VIX/VIX3M", color=colLine, linewidth=2)
+stateName(r, t) =>
+    r > 1.3 ? "危机级" : r > 1.2 ? "严重恐慌" : r > 1.1 ? "显著压力" : r > 1.0 ? "倒挂" : r >= t ? "偏紧" : "平静"
+stateCol(r, t) =>
+    r > 1.3 ? color.purple : r > 1.2 ? color.maroon : r > 1.1 ? color.red : r > 1.0 ? color.orange : r >= t ? #c79a00 : color.teal
+
+// 比值线与分档
+plot(ratio, "VIX/VIX3M", color=stateCol(ratio, tightLvl), linewidth=2)
+hline(tightLvl, "偏紧线", color=color.new(color.gray, 40), linestyle=hline.style_dotted)
 hline(1.0, "倒挂线 1.0", color=color.gray, linestyle=hline.style_solid)
-hline(1.1, "历史级恐慌 1.1", color=color.red, linestyle=hline.style_dashed)
-bgcolor(ratio > 1.1 ? color.new(color.red, 78) : ratio > 1.0 ? color.new(color.orange, 86) : na)
+hline(1.1, "显著压力 1.1", color=color.red, linestyle=hline.style_dashed)
+hline(1.2, "严重恐慌 1.2", color=color.maroon, linestyle=hline.style_dashed, display=showExt ? display.all : display.none)
+hline(1.3, "危机级 1.3", color=color.purple, linestyle=hline.style_dashed, display=showExt ? display.all : display.none)
+bgcolor(ratio > 1.3 ? color.new(color.purple, 75) : ratio > 1.2 ? color.new(color.maroon, 75) : ratio > 1.1 ? color.new(color.red, 78) : inv ? color.new(color.orange, 86) : na)
 
-// 交叉信号
-crossUp   = ta.crossover(ratio, 1.0)
+// 信号
+crossUp   = invDays == 1
+upPanic   = crossUp and vix > panicVix
 crossDeep = ta.crossover(ratio, 1.1)
-crossDown = ta.crossunder(ratio, 1.0)
-plotshape(crossUp,   "上穿1.0", style=shape.triangleup,   location=location.bottom, color=color.orange, size=size.tiny, text="卖put窗口")
-plotshape(crossDeep, "上穿1.1", style=shape.triangleup,   location=location.bottom, color=color.red,    size=size.tiny, text="加档")
-plotshape(crossDown, "下穿1.0", style=shape.triangledown, location=location.top,    color=color.teal,   size=size.tiny, text="解除·查右侧")
+dayRegime = invDays == regimeLen
+dayLong   = invDays == longLen
+relief    = endNow and lastPeak >= 1.1
+curveInv  = vix > vix3m and vix3m > vix6m and vix6m > vix1y
+// 整条曲线常在倒挂期间反复进出, 每轮 VIX/VIX3M 倒挂只标第一次
+var bool curveSeen = false
+curveUp   = showCurve and curveInv and not curveSeen
+if curveInv
+    curveSeen := true
+if not inv
+    curveSeen := false
 
-// 右上角状态表
-var table t = table.new(position.top_right, 2, 4, border_width=1)
+plotshape(crossUp and not upPanic, "倒挂开始",        shape.triangleup,   location.bottom,   color.orange, size=size.tiny, text="倒挂",   textcolor=color.orange)
+plotshape(upPanic,                 "倒挂开始且VIX高", shape.triangleup,   location.bottom,   color.red,    size=size.tiny, text="恐慌",   textcolor=color.red)
+plotshape(crossDeep ? ratio : na,  "上穿1.1",         shape.diamond,      location.absolute, color.red,    size=size.tiny, text="加档",   textcolor=color.red)
+plotshape(dayRegime ? ratio : na,  "倒挂满N日",       shape.circle,       location.absolute, color.maroon, size=size.tiny, text="5日",    textcolor=color.maroon)
+plotshape(dayLong ? ratio : na,    "倒挂满三周",      shape.circle,       location.absolute, color.purple, size=size.tiny, text="15日",   textcolor=color.purple)
+plotshape(curveUp ? ratio : na,    "整条曲线倒挂",    shape.square,       location.absolute, chart.fg_color, size=size.tiny, text="全线", textcolor=chart.fg_color)
+plotshape(endNow and not relief,   "倒挂解除·查右侧", shape.triangledown, location.top,      color.teal,   size=size.tiny, text="解除",   textcolor=color.teal)
+plotshape(relief,                  "恐慌消退·分批加", shape.triangledown, location.top,      color.green,  size=size.tiny, text="消退",   textcolor=color.green)
+
+// 仓位档(截图规则 1–5; 规则 1/2 的 VIX 条件覆盖不全, 按比值归档)
+reliefOn = not inv and not na(lastPeak) and lastPeak >= 1.1 and conDays <= reliefWin
+tierName = inv ? (invDays >= longLen ? "档4 持续倒挂" : vix > panicVix ? "档3 近端恐慌" : "档3 倒挂") :
+           reliefOn ? "档5 恐慌消退" : ratio >= tightLvl ? "档2 偏紧" : vix < calmVix ? "档1 平静" : "档1 平静·VIX偏高"
+tierAct  = inv ? (invDays >= longLen ? "按标普修正5–10%管理仓位, 抄底轻仓等止跌" : vix > panicVix ? "降高Beta/垃圾债, 只做卖方" : "降高Beta, 只做卖方, 不加右侧仓") :
+           reliefOn ? "分批加仓, 查右侧确认" : ratio >= tightLvl ? "仓位不动, 少做重仓/满仓追" : vix < calmVix ? "正常仓位, 远期价外put便宜" : "正常仓位, 保护不算便宜"
+tierCol  = inv ? (invDays >= longLen ? color.maroon : color.red) : reliefOn ? color.green : ratio >= tightLvl ? #c79a00 : color.teal
+
+// 近两年分位与近期倒挂占比
+pctRank = ta.percentrank(ratio, pctLen)
+p95     = ta.percentile_linear_interpolation(ratio, pctLen, 95)
+p99     = ta.percentile_linear_interpolation(ratio, pctLen, 99)
+inv60   = math.sum(inv ? 1 : 0, 60) / 60 * 100
+inv90   = math.sum(inv ? 1 : 0, 90) / 90 * 100
+
+plot(invDays, "倒挂连续日",       display=display.data_window)
+plot(conDays, "contango 连续日",  display=display.data_window)
+plot(pctRank, "近两年分位",       display=display.data_window)
+
+// 状态表(窗格矮时选"精简", 或把窗格拉高)
+tblPos  = tblPosIn == "右下" ? position.bottom_right : tblPosIn == "左上" ? position.top_left : tblPosIn == "左下" ? position.bottom_left : position.top_right
+tblSize = tblSizeIn == "极小" ? size.tiny : tblSizeIn == "中" ? size.normal : size.small
+var table t = table.new(tblPos, 2, 13, border_width=1)
+row(r, k, v, bg) =>
+    table.cell(t, 0, r, k, text_size=tblSize, text_color=chart.fg_color, bgcolor=bg, text_halign=text.align_left)
+    table.cell(t, 1, r, v, text_size=tblSize, text_color=chart.fg_color, bgcolor=bg, text_halign=text.align_left)
+
 if barstate.islast
-    stateTxt = ratio > 1.1 ? "历史级倒挂" : ratio > 1.0 ? "倒挂中" : "contango 正常"
-    stateBg  = ratio > 1.1 ? color.new(color.red, 60) : ratio > 1.0 ? color.new(color.orange, 60) : color.new(color.teal, 70)
-    table.cell(t, 0, 0, "VIX",        text_size=size.small, bgcolor=color.new(color.gray, 80))
-    table.cell(t, 1, 0, str.tostring(vix, "#.##"),   text_size=size.small, bgcolor=color.new(color.gray, 80))
-    table.cell(t, 0, 1, "VIX3M",      text_size=size.small, bgcolor=color.new(color.gray, 80))
-    table.cell(t, 1, 1, str.tostring(vix3m, "#.##"), text_size=size.small, bgcolor=color.new(color.gray, 80))
-    table.cell(t, 0, 2, "比值",       text_size=size.small, bgcolor=stateBg)
-    table.cell(t, 1, 2, str.tostring(ratio, "#.###"), text_size=size.small, bgcolor=stateBg)
-    table.cell(t, 0, 3, stateTxt,     text_size=size.small, bgcolor=stateBg)
-    table.cell(t, 1, 3, "连续 " + str.tostring(invDays) + " 日", text_size=size.small, bgcolor=stateBg)
+    gray    = color.new(color.gray, 80)
+    sBg     = color.new(stateCol(ratio, tightLvl), 65)
+    tBg     = color.new(tierCol, 65)
+    streak  = inv ? "倒挂 " + str.tostring(invDays) + " 日" : "contango " + str.tostring(conDays) + " 日"
+    warnTxt = "天数和分位都按K线数, 切日线再看"
+    warnBg  = color.new(color.yellow, 50)
+    if tblMode == "精简"
+        row(0, "VIX / 3M", str.tostring(vix, "0.00") + " / " + str.tostring(vix3m, "0.00"), gray)
+        row(1, "比值",     str.tostring(ratio, "0.000") + " " + stateName(ratio, tightLvl), sBg)
+        row(2, "连续",     streak, sBg)
+        row(3, "仓位档",   tierName, tBg)
+        if not isD
+            row(4, "⚠ 非日线", warnTxt, warnBg)
+    else
+        row(0, "VIX",   str.tostring(vix, "0.00"), gray)
+        row(1, "VIX3M", str.tostring(vix3m, "0.00"), gray)
+        row(2, "比值",  str.tostring(ratio, "0.000"), sBg)
+        row(3, "状态",  stateName(ratio, tightLvl), sBg)
+        row(4, "连续",  streak, sBg)
+        if inv
+            row(5, "本轮峰值", str.tostring(peak, "0.000"), sBg)
+        else
+            row(5, "上一轮倒挂", na(lastPeak) ? "—" : "峰值 " + str.tostring(lastPeak, "0.000") + " · " + str.tostring(lastLen) + " 日", gray)
+        row(6, "近两年分位",     str.tostring(pctRank, "0") + "%", gray)
+        row(7, "近两年 P95 / P99", str.tostring(p95, "0.000") + " / " + str.tostring(p99, "0.000"), gray)
+        row(8, "近 60 / 90 日倒挂", str.tostring(inv60, "0") + "% / " + str.tostring(inv90, "0") + "%", gray)
+        curveTxt = not showCurve ? "未开启" : na(vix1y) ? "无数据" : (curveInv ? "全线倒挂" : "正常") + "  6M " + str.tostring(vix6m, "0.0") + " · 1Y " + str.tostring(vix1y, "0.0")
+        row(9, "整条曲线", curveTxt, showCurve and curveInv ? color.new(color.red, 60) : gray)
+        row(10, "仓位档", tierName, tBg)
+        row(11, "动作",   tierAct, tBg)
+        if not isD
+            row(12, "⚠ 非日线", warnTxt, warnBg)
 
-// 警报(添加警报时选本指标,条件选下面任意一条;触发方式选"每根K线收盘")
-alertcondition(crossUp,   "倒挂开始(上穿1.0)",  "VIX/VIX3M 上穿 1.0:恐慌集中当下,CSP 窗口打开,分批第一档")
-alertcondition(crossDeep, "历史级恐慌(上穿1.1)", "VIX/VIX3M 上穿 1.1:历史级恐慌区,加第二/三档,倒挂期间不加右侧仓")
-alertcondition(crossDown, "倒挂解除(下穿1.0)",  "VIX/VIX3M 下穿 1.0:倒挂解除——查右侧确认(20日线/下降趋势线),LEAP/risk reversal 窗口")
+// 警报(添加警报时选本指标, 条件选下面任意一条; 触发方式选"每根K线收盘一次")
+alertcondition(crossUp,   "倒挂开始(上穿1.0)",      'VIX/VIX3M 上穿 1.0 = {{plot("VIX/VIX3M")}}: 恐慌集中当下, 降高 Beta; CSP 窗口打开, 分批第一档')
+alertcondition(upPanic,   "倒挂开始且VIX高(规则3)", 'VIX/VIX3M 上穿 1.0 = {{plot("VIX/VIX3M")}} 且 VIX 超过阈值: 近端恐慌已开始, 降高 Beta / 垃圾债持仓')
+alertcondition(crossDeep, "显著压力(上穿1.1)",      'VIX/VIX3M 上穿 1.1 = {{plot("VIX/VIX3M")}}: 显著压力, CSP 加第二/三档, 倒挂期间不加右侧仓')
+alertcondition(dayRegime, "倒挂满N日(状态转换)",    'VIX/VIX3M 连续倒挂满设定天数(默认 5): 不是单日噪音, 状态已转换')
+alertcondition(dayLong,   "倒挂满三周(规则4)",      'VIX/VIX3M 连续倒挂满设定天数(默认 15): 按标普至少 5–10% 修正管理仓位, 抄底轻仓等止跌')
+alertcondition(endNow,    "倒挂解除(下穿1.0)",      'VIX/VIX3M 下穿 1.0 = {{plot("VIX/VIX3M")}}: 倒挂解除——查右侧确认(20日线/下降趋势线), LEAP/risk reversal 窗口')
+alertcondition(relief,    "恐慌消退(规则5)",        'VIX/VIX3M 本轮峰值 ≥1.1 后回到 1.0 以下: 恐慌消退, 分批加仓')
+alertcondition(curveUp,   "整条曲线倒挂(每轮首次)", 'VIX > VIX3M > VIX6M > VIX1Y 整条曲线倒挂: 确认恐慌, 不是提前报警')
