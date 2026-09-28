@@ -6,7 +6,7 @@
 // 定位: 用来定调风险和仓位, 不当唯一的买卖触发条件。
 //
 // 信号体系(对应《危机黄金与左右侧交易·实战笔记》第九节 + 期限结构仓位五档):
-//   上穿 1.0 = 倒挂开始, 恐慌集中当下 → 降高 Beta; 卖 CSP 窗口打开(分批, 第一档)。同时 VIX > 25 = 近端恐慌(规则 3)
+//   上穿 1.0 = 倒挂开始, 恐慌集中当下 → 只做卖方, 卖 CSP 窗口打开(分批, 第一档)。同时 VIX > 25 标"恐慌"(权利金厚)
 //   上穿 1.1 = 显著压力 → CSP 加第二、三档, 倒挂期间不加右侧仓
 //   倒挂满 5 日 = 状态真正转换; 满 10 日(约两周) = 准备修正预案;
 //   满 15 日(约三周) = 按标普至少 5–10% 修正管理仓位, 抄底轻仓等止跌(规则 4)
@@ -21,7 +21,9 @@
 //   > 1.1         显著压力  占 1.6% 的交易日, 9 个年份到过: 2010 / 11 / 14 / 15 / 18 / 19 / 20 / 24 / 25
 //   > 1.2         严重恐慌
 //   > 1.3         危机级    只有 2015 / 2018 / 2020
-//   上穿 1.0 时 VIX > 25: 105 次里 41 次。峰值 ≥ 1.1 后解除: 14 次。
+//   上穿 1.0 时 VIX > 25: 105 次里 41 次。截图规则 3 说这时要"降高 Beta", 数据不支持: 这 41 次之后 21 日
+//     SPX +2.73% / 胜率 78%(VIX ≤ 25 的 64 次: +1.29% / 67%), 持续天数与峰值也不更差, 只有 2020 一次是坏尾巴。
+//     所以只标记(权利金厚), 不设警报。峰值 ≥ 1.1 后解除: 14 次。
 //   规则 1 / 2 的 VIX 条件覆盖不全(42% 的 contango 日两条都不满足), 这里按比值归档, VIX 只改提示语。
 //
 // 信号当天收盘买 SPX 的前瞻收益(平均 / 胜率, 2009-09 起, 只用当天已知的信息):
@@ -131,7 +133,7 @@ plotshape(relief,                  "恐慌消退·分批加", shape.triangledown
 reliefOn = not inv and not na(lastPeak) and lastPeak >= 1.1 and conDays <= reliefWin
 tierName = inv ? (invDays >= longLen ? "档4 持续倒挂" : vix > panicVix ? "档3 近端恐慌" : "档3 倒挂") :
            reliefOn ? "档5 恐慌消退" : ratio >= tightLvl ? "档2 偏紧" : vix < calmVix ? "档1 平静" : "档1 平静·VIX偏高"
-tierAct  = inv ? (invDays >= longLen ? "按标普修正5–10%管理仓位, 抄底轻仓等止跌" : vix > panicVix ? "降高Beta/垃圾债, 只做卖方" : "降高Beta, 只做卖方, 不加右侧仓") :
+tierAct  = inv ? (invDays >= longLen ? "按标普修正5–10%管理仓位, 抄底轻仓等止跌" : vix > panicVix ? "只做卖方, 权利金厚" : "只做卖方, 不加右侧仓") :
            reliefOn ? "分批加仓, 查右侧确认" : ratio >= tightLvl ? "仓位不动, 少做重仓/满仓追" : vix < calmVix ? "正常仓位, 远期价外put便宜" : "正常仓位, 保护不算便宜"
 tierCol  = inv ? (invDays >= longLen ? color.maroon : color.red) : reliefOn ? color.green : ratio >= tightLvl ? #c79a00 : color.teal
 
@@ -189,8 +191,7 @@ if barstate.islast
             row(12, "⚠ 非日线", warnTxt, warnBg)
 
 // 警报(添加警报时选本指标, 条件选下面任意一条; 触发方式选"每根K线收盘一次")
-alertcondition(crossUp,   "倒挂开始(上穿1.0)",      'VIX/VIX3M 上穿 1.0 = {{plot("VIX/VIX3M")}}: 恐慌集中当下, 降高 Beta; CSP 窗口打开, 分批第一档')
-alertcondition(upPanic,   "倒挂开始且VIX高(规则3)", 'VIX/VIX3M 上穿 1.0 = {{plot("VIX/VIX3M")}} 且 VIX 超过阈值: 近端恐慌已开始, 降高 Beta / 垃圾债持仓')
+alertcondition(crossUp,   "倒挂开始(上穿1.0)",      'VIX/VIX3M 上穿 1.0 = {{plot("VIX/VIX3M")}}: 恐慌集中当下, 只做卖方; CSP 窗口打开, 分批第一档')
 alertcondition(crossDeep, "显著压力(上穿1.1)",      'VIX/VIX3M 上穿 1.1 = {{plot("VIX/VIX3M")}}: 显著压力, CSP 加第二/三档, 倒挂期间不加右侧仓')
 alertcondition(dayRegime, "倒挂满N日(状态转换)",    'VIX/VIX3M 连续倒挂满设定天数(默认 5): 不是单日噪音, 状态已转换')
 alertcondition(dayMid,    "倒挂满两周",             'VIX/VIX3M 连续倒挂满设定天数(默认 10): 2009 年起只有 5 次走到这里, 其中 3 次继续到 15 日——准备修正预案')
