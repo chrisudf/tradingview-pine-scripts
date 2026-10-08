@@ -1,0 +1,144 @@
+//@version=6
+indicator("RSI 超卖反弹 v3", shorttitle="RSI OS v3", overlay=true, max_labels_count=500)
+
+// 合并 RSI Alert Helper / test / Improved / 人性之极 四个脚本（2026-10-06）。
+// 回测：44 个标的，2015-01 至 2026-10，日线；收盘买入，收盘站上 SMA5 卖出（最长 10 根）。
+// 超额收益 = 扣除该标的同样天数的平均涨幅；括号内是 90% 区间（按月聚类 bootstrap）：
+//   RSI14 首次跌破 30                  N=1199  每笔 +1.06%  超额 +0.73% [+0.16,+1.38]  胜率 68%
+//   RSI14 首次跌破 30，且在 200 日线上方 N=163   每笔 +1.96%  超额 +1.66% [+1.18,+2.20]  胜率 79%
+//   RSI2<10 且在 200 日线上方（4 只指数） N=733   每笔 +0.53%  超额 +0.35% [+0.17,+0.53]  胜率 74%
+//   旧的三个"等确认"脚本（RSI 回升 / 收阳 / 放量之后才买）超额在 -0.2% 到 0 之间：确认出现时反弹已经走完了。
+// 次日开盘买入只少约 0.1 个点，所以可以收盘时提醒、第二天盘前挂单。
+// 优势只在于"持有几天、吃一段反弹"，固定持有 10/20 天就不显著了。这个指标不是抄底指标。
+//
+// 2026-10-08 加了"参数预设"。RSI6/20 和 RSI14/30 的对比（同样的进出场规则）：
+//   44 个标的合计：RSI6/20 每只每年 3.5 次、每笔超额 +0.53%；RSI14/30 每年 2.3 次、+0.71%。A 级差距最大：+0.71% 对 +1.50%。
+//   QQQ，2015 年起：RSI6/20 每年 2.8 次（各年 0–5 次）、胜率 91%、每笔 +2.0%、最差 -2.7%，25 次 >=8% 的回撤抓到 18 次；
+//                   RSI14/30 每年 1.7 次、胜率 100%、每笔 +2.9%，抓到 11 次。
+//   第一个信号出现时，这一段回撤的跌幅中位数已经走完约三分之二，所以它是"回撤中段加仓点"，不是底部。
+// 只在日线上回测过。TradingView 底部的 3M/6M 按钮会切到 1h/2h、5Y 切到周线，参数按根数算，意思全变；
+// 所以非日线时面板顶部红字提示、A/B 标记变灰、提醒消息带上周期。
+
+grpS = "信号"
+P14 = "RSI14 / 30（回测最稳）"
+P6  = "RSI6 / 20（QQQ 一年约 3 次）"
+PC  = "自定义（用下面两项）"
+preset   = input.string(P6, "参数预设", options=[P14, P6, PC], group=grpS, tooltip="RSI14/30：信号少、每笔最强（44 标的 A 级每笔超额 +1.50%）。RSI6/20：信号多约一半、每笔弱一些（A 级 +0.71%），QQQ 一年约 2.8 次。选「自定义」才会用下面两项")
+rsiLen   = input.int(14, "自定义：RSI 长度", minval=2, group=grpS)
+osLevel  = input.int(30, "自定义：超卖线", minval=5, maxval=50, group=grpS, tooltip="阈值越深，信号越少、每笔越强（回测单调）")
+trendLen = input.int(200, "趋势均线", minval=20, group=grpS)
+showB    = input.bool(true, "显示 200 日线下方的 B 级信号", group=grpS, tooltip="B 级回测超额 +0.58%，区间跨 0；个股最差一笔 -62%")
+useR2    = input.bool(false, "启用 RSI(2) 短线信号（适合指数 ETF）", group=grpS)
+r2Level  = input.int(10, "RSI(2) 阈值", minval=1, maxval=30, group=grpS)
+
+grpX = "离场"
+exitLen  = input.int(5, "离场均线（收盘站上即离场）", minval=2, group=grpX)
+maxHold  = input.int(10, "最长持有（根）", minval=1, group=grpX)
+
+grpD = "显示"
+showMA   = input.bool(false, "画出趋势均线", group=grpD)
+showTbl  = input.bool(true, "信息面板", group=grpD)
+tblPos   = input.string("右下", "面板位置", options=["右上", "右中", "右下", "左上", "左下", "中下"], group=grpD)
+ddLen    = input.int(120, "回撤基准：N 根内最高点", minval=20, group=grpD)
+
+// === 计算 ===
+lenE    = preset == P14 ? 14 : preset == P6 ? 6 : rsiLen
+osE     = preset == P14 ? 30 : preset == P6 ? 20 : osLevel
+rS      = ta.rsi(close, lenE)
+r2      = ta.rsi(close, 2)
+maT     = ta.sma(close, trendLen)
+maX     = ta.sma(close, exitLen)
+inTrend = close > maT
+ddPct   = (close / ta.highest(high, ddLen) - 1) * 100
+isD     = timeframe.isdaily and timeframe.multiplier == 1
+tfName  = timeframe.isintraday ? (timeframe.multiplier % 60 == 0 ? str.tostring(timeframe.multiplier / 60) + " 小时" : str.tostring(timeframe.multiplier) + " 分钟") : timeframe.isdaily ? str.tostring(timeframe.multiplier) + " 日" : timeframe.isweekly ? str.tostring(timeframe.multiplier) + " 周" : timeframe.ismonthly ? str.tostring(timeframe.multiplier) + " 月" : timeframe.period
+tfTag   = isD ? "" : "[" + tfName + "线，未回测] "
+
+osCross = ta.crossunder(rS, osE)         // 只在第一根跌破时触发，不会每根都报
+sigA    = osCross and inTrend
+sigB    = osCross and not inTrend and showB
+sigR2   = useR2 and r2 < r2Level and inTrend and not osCross
+
+// === 持仓状态机：同一时间只跟踪一笔；持仓期间出现的新信号不重复开仓 ===
+// tag: 0 = A, 1 = B, 2 = RSI(2)
+var bool  inPos    = false
+var int   entryBar = na
+var float entryPx  = na
+var int   tag      = na
+var array<int>   nT = array.new<int>(3, 0)
+var array<int>   nW = array.new<int>(3, 0)
+var array<float> sR = array.new<float>(3, 0.0)
+
+exitNow = false
+exitRet = 0.0
+if inPos and bar_index > entryBar and (close > maX or bar_index - entryBar >= maxHold)
+    exitNow := true
+    exitRet := close / entryPx - 1
+    nT.set(tag, nT.get(tag) + 1)
+    nW.set(tag, nW.get(tag) + (exitRet > 0 ? 1 : 0))
+    sR.set(tag, sR.get(tag) + exitRet)
+    inPos := false
+
+entryNow = not inPos and (sigA or sigB or sigR2)
+if entryNow
+    inPos    := true
+    entryBar := bar_index
+    entryPx  := close
+    tag      := sigA ? 0 : sigB ? 1 : 2
+
+// === 画图 ===
+plot(maT, "趋势均线", color=color.new(color.gray, 30), display=showMA ? display.all : display.none)
+plotshape(entryNow and tag == 0, "A 级：200 日线上方超卖", shape.labelup, location.belowbar, isD ? color.new(color.green, 0) : color.new(color.gray, 30), text="A", textcolor=color.white, size=size.small)
+plotshape(entryNow and tag == 1, "B 级：200 日线下方超卖", shape.labelup, location.belowbar, isD ? color.new(color.orange, 0) : color.new(color.gray, 30), text="B", textcolor=color.white, size=size.small)
+plotshape(entryNow and tag == 2, "RSI(2) 短线", shape.triangleup, location.belowbar, color.new(color.teal, 0), size=size.tiny)
+plotshape(exitNow, "离场", shape.xcross, location.abovebar, color.new(color.gray, 0), size=size.tiny)
+// 只进数据窗口，方便 MCP 的 data_get_study_values 直接读数
+plot(rS, "RSI(设定)", display=display.data_window)
+plot(r2, "RSI2", display=display.data_window)
+plot(inPos ? bar_index - entryBar : -1, "持仓天数(-1=空仓)", display=display.data_window)
+
+// === 提醒：一条 "Any alert() function call" 提醒就能同时覆盖入场和离场，省 Basic 的提醒名额 ===
+tagName(t) => t == 0 ? "A 级" : t == 1 ? "B 级" : "RSI(2)"
+if entryNow
+    alert(tfTag + syminfo.ticker + " " + tagName(tag) + "超卖：RSI" + str.tostring(lenE) + "=" + str.tostring(rS, "0.0") + "，RSI2=" + str.tostring(r2, "0.0") + "，收盘 " + str.tostring(close, format.mintick) + "，距高点 " + str.tostring(ddPct, "0.0") + "%", alert.freq_once_per_bar_close)
+if exitNow
+    alert(tfTag + syminfo.ticker + " 离场：收盘 " + str.tostring(close, format.mintick) + "，这笔 " + str.tostring(exitRet * 100, "+0.0;-0.0") + "%", alert.freq_once_per_bar_close)
+alertcondition(entryNow and tag == 0, "A 级超卖", "{{ticker}} A 级超卖（200 日线上方 RSI 跌破超卖线），收盘 {{close}}")
+alertcondition(entryNow, "任意入场", "{{ticker}} RSI 超卖入场信号，收盘 {{close}}")
+alertcondition(exitNow, "离场", "{{ticker}} 收盘站上离场均线或持有到期，收盘 {{close}}")
+
+// === 信息面板 ===
+posOf(s) =>
+    switch s
+        "右上" => position.top_right
+        "右中" => position.middle_right
+        "左上" => position.top_left
+        "左下" => position.bottom_left
+        "中下" => position.bottom_center
+        => position.bottom_right
+var table tb = table.new(posOf(tblPos), 2, 9, bgcolor=color.new(color.gray, 85), border_width=1)
+statTxt(i) =>
+    n = nT.get(i)
+    n == 0 ? "无" : str.tostring(n) + " 笔 胜率 " + str.tostring(100.0 * nW.get(i) / n, "0") + "% 均值 " + str.tostring(100 * sR.get(i) / n, "+0.00;-0.00") + "%"
+if showTbl and barstate.islast
+    fg = chart.fg_color
+    o = isD ? 0 : 1
+    if not isD
+        table.cell(tb, 0, 0, "⚠ 当前是 " + tfName + "线：参数只在日线回测过，信号和统计没有回测依据", text_color=color.white, bgcolor=color.new(color.red, 20), text_size=size.small)
+        table.merge_cells(tb, 0, 0, 1, 0)
+    table.cell(tb, 0, 0 + o, "RSI" + str.tostring(lenE) + " / " + str.tostring(osE), text_color=fg, text_size=size.small)
+    table.cell(tb, 1, 0 + o, str.tostring(rS, "0.0"), text_color=rS < osE ? color.red : fg, text_size=size.small)
+    table.cell(tb, 0, 1 + o, "RSI2", text_color=fg, text_size=size.small)
+    table.cell(tb, 1, 1 + o, str.tostring(r2, "0.0"), text_color=r2 < r2Level ? color.red : fg, text_size=size.small)
+    table.cell(tb, 0, 2 + o, "趋势", text_color=fg, text_size=size.small)
+    table.cell(tb, 1, 2 + o, (inTrend ? "均线上方 " : "均线下方 ") + str.tostring((close / maT - 1) * 100, "+0.0;-0.0") + "%", text_color=inTrend ? color.green : color.orange, text_size=size.small)
+    table.cell(tb, 0, 3 + o, "距高点", text_color=fg, text_size=size.small)
+    table.cell(tb, 1, 3 + o, str.tostring(ddPct, "0.0") + "%", text_color=ddPct < -20 ? color.red : ddPct < -10 ? color.orange : fg, text_size=size.small)
+    table.cell(tb, 0, 4 + o, "状态", text_color=fg, text_size=size.small)
+    table.cell(tb, 1, 4 + o, inPos ? tagName(tag) + " 持仓第 " + str.tostring(bar_index - entryBar) + " 根，" + str.tostring((close / entryPx - 1) * 100, "+0.0;-0.0") + "%" : "空仓", text_color=inPos ? color.green : fg, text_size=size.small)
+    table.cell(tb, 0, 5 + o, "本图历史 A", text_color=fg, text_size=size.small)
+    table.cell(tb, 1, 5 + o, statTxt(0), text_color=fg, text_size=size.small)
+    table.cell(tb, 0, 6 + o, "本图历史 B", text_color=fg, text_size=size.small)
+    table.cell(tb, 1, 6 + o, statTxt(1), text_color=fg, text_size=size.small)
+    table.cell(tb, 0, 7 + o, "本图历史 RSI(2)", text_color=fg, text_size=size.small)
+    table.cell(tb, 1, 7 + o, useR2 ? statTxt(2) : "未启用", text_color=fg, text_size=size.small)
