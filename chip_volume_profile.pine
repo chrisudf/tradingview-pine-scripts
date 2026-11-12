@@ -18,8 +18,9 @@ indicator("筹码峰 (可见范围成交量分布)", shorttitle = "筹码峰VP",
 //   2. 用柱子长短找结构：
 //      · 筹码区：长且连成片的柱子 (多空充分换手、价格停留久的区域)
 //      · 筹码真空：两个筹码区之间柱子很短的价位，价格进入后常常走得快
-//   3. 美股请用主交易所代码 (如 NASDAQ:NVDA)，BATS 等单一交易所成交量不完整。
-//   4. 柱子挡住 K 线时调小「宽度」；想要更细的分布调大「价格行数」(≤240)。
+//   3. 柱子挡住 K 线时调小「宽度」；想要更细的分布调大「价格行数」(≤240)。
+//   4. 最多统计最近 5,000 根 K 线；范围更大时只算最近 5,000 根，图上会出现提示。
+//      没有成交量数据的品种 (如部分指数) 不画分布，只显示提示。
 //
 // 【回测结论：别把筹码峰当成单独的支撑信号】
 //   22 个美股 / ETF，2009–2026 日线，约 2,700 次"价格从上方回踩某价位"事件，
@@ -74,6 +75,8 @@ if barstate.islast
     int iStart = iEnd
     while iStart + 1 <= math.min(4999, bar_index) and time[iStart + 1] >= leftT
         iStart += 1
+    // 达到 5,000 根上限且更早的K线仍在范围内 → 被截断
+    bool truncated = iStart >= 4999 and bar_index > 4999 and time[4999] > leftT
 
     float lo = low[iEnd]
     float hi = high[iEnd]
@@ -82,23 +85,30 @@ if barstate.islast
         hi := math.max(hi, high[i])
     float step = math.max((hi - lo) / rows, syminfo.mintick)
 
-    array<float> upV = array.new<float>(rows, 0.0)
-    array<float> dnV = array.new<float>(rows, 0.0)
+    // 差分数组：每根K线 O(1) 累加，再做一次前缀和，避免 K线数 × 行数 的内层循环
+    array<float> dU = array.new<float>(rows + 1, 0.0)
+    array<float> dD = array.new<float>(rows + 1, 0.0)
     for i = iEnd to iStart
         int k0 = math.min(rows - 1, int(math.floor((low[i] - lo) / step)))
         int k1 = math.min(rows - 1, int(math.floor((high[i] - lo) / step)))
         float v = nz(volume[i]) / (k1 - k0 + 1)   // 成交量在 high-low 间均匀分配
-        bool isUp = close[i] >= open[i]
-        for k = k0 to k1
-            if isUp
-                array.set(upV, k, array.get(upV, k) + v)
-            else
-                array.set(dnV, k, array.get(dnV, k) + v)
+        array<float> d = close[i] >= open[i] ? dU : dD
+        array.set(d, k0, array.get(d, k0) + v)
+        array.set(d, k1 + 1, array.get(d, k1 + 1) - v)
 
+    array<float> upV = array.new<float>(rows, 0.0)
+    array<float> dnV = array.new<float>(rows, 0.0)
     array<float> tot = array.new<float>(rows, 0.0)
+    float runU = 0.0
+    float runD = 0.0
     for k = 0 to rows - 1
+        runU += array.get(dU, k)
+        runD += array.get(dD, k)
+        array.set(upV, k, math.max(runU, 0.0))
+        array.set(dnV, k, math.max(runD, 0.0))
         array.set(tot, k, array.get(upV, k) + array.get(dnV, k))
     float allV = array.sum(tot)
+    bool hasVol = allV > 0
     float maxV = array.max(tot)
     int poc = array.indexof(tot, maxV)
 
@@ -140,9 +150,13 @@ if barstate.islast
     float pocP = lo + (poc + 0.5) * step
     float vah  = lo + (b + 1) * step
     float val  = lo + a * step
-    if showPOC
+    if not hasVol
+        array.push(lbs, label.new(x0, hi, "⚠ 该品种没有成交量数据，无法计算筹码峰", style = label.style_label_lower_left, color = color.new(#f23645, 20), textcolor = color.white, size = size.small))
+    else if truncated
+        array.push(lbs, label.new(x0, hi, "⚠ 范围超过 5,000 根K线，只统计了最近 5,000 根", style = label.style_label_lower_left, color = color.new(#ff9800, 20), textcolor = color.white, size = size.small))
+    if showPOC and hasVol
         array.push(lns, line.new(x0, pocP, bar_index, pocP, color = colPOC, style = line.style_dotted, extend = extend.right))
-    if showVA
+    if showVA and hasVol
         array.push(lns, line.new(x0, vah, bar_index, vah, color = color.new(#26a69a, 0), style = line.style_dashed, extend = extend.right))
         array.push(lns, line.new(x0, val, bar_index, val, color = color.new(#26a69a, 0), style = line.style_dashed, extend = extend.right))
         array.push(lbs, label.new(bar_index, vah, "VAH " + str.tostring(vah, format.mintick), style = label.style_label_left, color = color.new(color.white, 100), textcolor = #26a69a, size = size.small))
